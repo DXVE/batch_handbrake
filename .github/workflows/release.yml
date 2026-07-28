@@ -1,0 +1,23 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 打包脚本
+        run: git archive --format=zip --output=${{ github.event.repository.name }}.zip HEAD
+
+      - name: 创建 Release 并上传
+        uses: softprops/action-gh-release@v3
+        with:
+          files: ${{ github.event.repository.name }}.zip

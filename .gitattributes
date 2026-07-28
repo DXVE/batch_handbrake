@@ -1,0 +1,8 @@
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+
+# export-ignore — git archive 打包时排除以下路径，不随 release 分发
+.github/       export-ignore
+.gitignore     export-ignore
+.gitattributes export-ignore

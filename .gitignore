@@ -1,0 +1,34 @@
+# HandBrake 预设文件（自行导出）
+*.json
+
+# HandBrakeCLI 二进制文件（请自行从官网下载）
+HandBrakeCLI.exe
+
+# 日志目录
+log/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# 系统文件
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# 编辑器/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Virtual environments
+venv/
+.venv/
+env/
