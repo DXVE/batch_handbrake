@@ -26,6 +26,9 @@ VIDEO_EXTENSIONS = {
     ".3gp", ".asf", ".divx", ".rmvb", ".f4v",
 }
 
+# 转码中途写入的临时文件标记，例如 影片.hbpart.mp4，成功后再原子改名为 影片.mp4
+PART_TOKEN = ".hbpart."
+
 _LOG_FILE = None
 _LOG_LOCK = threading.Lock()
 _ACTIVE_SUBPROCESSES = set()
@@ -144,6 +147,8 @@ def collect_video_files(source_dir):
 
     for root, dirs, filenames in os.walk(source_dir, onerror=onerror):
         for fname in filenames:
+            if PART_TOKEN in fname:
+                continue
             if Path(fname).suffix.lower() in VIDEO_EXTENSIONS:
                 files.append(Path(root) / fname)
     files.sort()
@@ -159,12 +164,88 @@ def build_output_path(file_path, source_dir, output_dir, ext):
     return output_dir / rel.parent / (rel.stem + ext)
 
 
-def extract_preset_name_from_json(json_path):
+def make_part_path(output_file):
+    """转码期间使用的临时文件路径，保留原扩展名以便 HandBrakeCLI 识别容器。"""
+    return output_file.with_name(
+        output_file.stem + PART_TOKEN + output_file.suffix.lstrip("."))
+
+
+def _output_key(path):
+    # Windows 文件系统大小写不敏感，统一按小写比较
+    return str(path).casefold()
+
+
+def _unique_path(base, taken, avoid_disk):
+    candidate = base
+    index = 1
+    while _output_key(candidate) in taken or (avoid_disk and candidate.exists()):
+        candidate = base.with_name("{}_{}{}".format(base.stem, index, base.suffix))
+        index += 1
+    return candidate
+
+
+def plan_outputs(video_files, source_dir, output_dir, ext):
+    """确定每个源文件的最终输出路径，处理批内重名与已存在的成品。
+
+    返回 [(video_file, output_file), ...]；已按用户选择跳过的不在其中。
+    """
+    assigned = []
+    taken = set()
+    renamed = []
+
+    for video_file in video_files:
+        base = build_output_path(video_file, source_dir, output_dir, ext)
+        final = base
+        if _output_key(base) in taken:
+            final = _unique_path(base, taken, avoid_disk=False)
+        taken.add(_output_key(final))
+        assigned.append([video_file, final])
+        if final != base:
+            renamed.append((base, final))
+
+    if renamed:
+        user_print("【预检】发现 {} 处输出重名，已自动改名以保留全部文件：".format(len(renamed)))
+        for before, after in renamed:
+            user_print("  {}  ->  {}".format(before.name, after.name))
+
+    existing = [pair for pair in assigned if pair[1].exists()]
+    if existing:
+        user_print("【预检】输出目录已存在 {} 个同名成品，处理方式：".format(len(existing)))
+        user_print("  1) 跳过（推荐，可续转）")
+        user_print("  2) 覆盖")
+        user_print("  3) 自动改名保留")
+        choice = input("  选择 (回车=1): ").strip()
+        if choice == "3":
+            for pair in existing:
+                pair[1] = _unique_path(pair[1], taken, avoid_disk=True)
+                taken.add(_output_key(pair[1]))
+        elif choice == "2":
+            pass
+        else:
+            before_count = len(assigned)
+            assigned = [pair for pair in assigned if not pair[1].exists()]
+            user_print("  已跳过 {} 个已存在的成品".format(before_count - len(assigned)))
+
+    return [(video_file, output_file) for video_file, output_file in assigned]
+
+
+def decode_bytes(raw):
+    """HandBrakeCLI 输出优先按 UTF-8 解码，失败回退 GBK。"""
+    for enc in ("utf-8", "gbk", "mbcs"):
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _find_first_preset(json_path):
+    """返回 JSON 中第一个叶子预设的 (完整名称, 预设字典)，失败返回 (None, None)。"""
     try:
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception:
-        return None
+        return None, None
 
     def find_preset(obj, path=""):
         if isinstance(obj, dict):
@@ -172,18 +253,100 @@ def extract_preset_name_from_json(json_path):
             children = obj.get("ChildrenArray", [])
             if children:
                 for child in children:
-                    r = find_preset(child, "{}/{}".format(path, name) if path else name)
-                    if r:
-                        return r
+                    found = find_preset(child, "{}/{}".format(path, name) if path else name)
+                    if found:
+                        return found
             elif name:
-                return "{}/{}".format(path, name) if path else name
+                return ("{}/{}".format(path, name) if path else name), obj
         return None
 
     for item in data.get("PresetList", []):
-        r = find_preset(item)
-        if r:
-            return r
-    return find_preset(data)
+        found = find_preset(item)
+        if found:
+            return found
+    return find_preset(data) or (None, None)
+
+
+def extract_preset_name_from_json(json_path):
+    name, _ = _find_first_preset(json_path)
+    return name
+
+
+def list_preset_names(preset_file=None):
+    """调用 HandBrakeCLI 列出可用预设名（实测输出走 stderr）。失败返回 None。"""
+    cmd = [HANDBRAKE_CLI]
+    if preset_file:
+        cmd += ["--preset-import-file", preset_file]
+    cmd += ["--preset-list"]
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            timeout=120,
+        )
+    except Exception as e:
+        log("预设列表执行失败: {}".format(e), level="WARN")
+        return None
+
+    text = decode_bytes((proc.stdout or b"") + b"\n" + (proc.stderr or b""))
+    names = set()
+    for line in text.replace("\r", "\n").split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if (stripped.startswith("[")
+                or stripped.startswith("Cannot load")
+                or stripped.startswith("HandBrake has exited")):
+            continue
+        names.add(stripped)
+    return names
+
+
+def check_preset(preset, container):
+    """开工前校验预设，返回解析出的预设名；用户选择中止时返回 None。"""
+    user_print("【预检】预设")
+    preset_name = preset
+    preset_json = None
+
+    if os.path.isfile(preset):
+        preset_json = preset
+        preset_name = extract_preset_name_from_json(preset)
+        if not preset_name:
+            user_print("  预设校验失败：无法从 JSON 提取预设名，请检查文件内容或格式")
+            log("预设校验失败: JSON 无法解析出预设名 ({})".format(preset), level="ERROR")
+            return None
+        user_print("  JSON 中解析出预设名: {}".format(preset_name))
+    else:
+        user_print("  使用内置预设名: {}".format(preset_name))
+
+    names = list_preset_names(preset_json)
+    if names is None:
+        user_print("  警告：无法获取 HandBrakeCLI 预设列表，跳过名称校验")
+    else:
+        leaf = preset_name.rsplit("/", 1)[-1]
+        if preset_name in names or leaf in names:
+            user_print("  预设名称校验通过")
+        else:
+            user_print("  警告：在 HandBrakeCLI 预设列表中未找到 '{}'".format(preset_name))
+            answer = input("  是否仍要继续？(y/N): ").strip().lower()
+            if answer != "y":
+                return None
+
+    if preset_json:
+        _, preset_obj = _find_first_preset(preset_json)
+        fmt = (preset_obj or {}).get("FileFormat", "")
+        want = {"mp4": "av_mp4", "mkv": "av_mkv"}.get(container)
+        if fmt and want and fmt != want:
+            user_print("  警告：预设输出格式为 {}，与所选容器 {} 不一致，可能导致转码失败"
+                       .format(fmt, container))
+            answer = input("  是否仍要继续？(y/N): ").strip().lower()
+            if answer != "y":
+                return None
+
+    log("预设校验完成: {}".format(preset_name))
+    return preset_name
 
 
 def terminate_all_subprocesses():
@@ -289,23 +452,43 @@ def run_handbrake(input_file, output_file, preset):
 def encode_one(task):
     (idx, total, video_file, output_file, preset, source_dir, output_dir) = task
     rel_path = get_relative_path(video_file, source_dir)
+    part_file = make_part_path(output_file)
 
     user_print("[{}/{}] 转码中: {}".format(idx, total, rel_path))
 
     log("=" * 55)
     log("[{}/{}] 开始: {}".format(idx, total, rel_path))
-    log("命令: {} --preset ... -i \"{}\" -o \"{}\"".format(
-        HANDBRAKE_CLI, video_file, output_file))
+    log("命令: {} --preset ... -i \"{}\" -o \"{}\"  (临时文件)".format(
+        HANDBRAKE_CLI, video_file, part_file))
     log("-" * 55)
 
-    ok = run_handbrake(video_file, output_file, preset)
+    # 清掉上次异常退出可能残留的临时文件
+    try:
+        if part_file.exists():
+            part_file.unlink()
+            log("[{}/{}] 已清理残留临时文件: {}".format(idx, total, part_file), level="WARN")
+    except Exception as e:
+        log("[{}/{}] 清理临时文件失败: {} ({})".format(idx, total, part_file, e), level="ERROR")
 
-    if not ok and output_file.exists():
+    encoded = run_handbrake(video_file, part_file, preset)
+
+    ok = False
+    if encoded:
         try:
-            output_file.unlink()
-            log("[{}/{}] 已删除无效文件: {}".format(idx, total, output_file), level="WARN")
+            # 成功才原子改名，保证最终路径上只会出现完整成品
+            os.replace(str(part_file), str(output_file))
+            ok = True
         except Exception as e:
-            log("[{}/{}] 删除无效文件失败: {} ({})".format(idx, total, output_file, e), level="ERROR")
+            log("[{}/{}] 转码完成但改名失败，已保留临时文件 {}: {}".format(
+                idx, total, part_file, e), level="ERROR")
+    else:
+        # 只删临时文件，绝不碰已存在的成品
+        try:
+            if part_file.exists():
+                part_file.unlink()
+                log("[{}/{}] 已删除临时文件: {}".format(idx, total, part_file), level="WARN")
+        except Exception as e:
+            log("[{}/{}] 删除临时文件失败: {} ({})".format(idx, total, part_file, e), level="ERROR")
 
     status = "OK  " if ok else "FAIL"
     user_print("[{}/{}] {}   {}".format(idx, total, status, rel_path))
@@ -389,9 +572,22 @@ def main():
             container = "mp4"
         output_ext = "." + container
 
+        if check_preset(preset, container) is None:
+            user_print("已取消")
+            input("按回车退出...")
+            return
+
+        planned = plan_outputs(video_files, source_dir, output_dir, output_ext)
+        if not planned:
+            user_print("所有输出都已存在，无需转码")
+            input("按回车退出...")
+            return
+        if len(planned) != total:
+            user_print("本次将转码 {} 个（扫描到 {} 个）\n".format(len(planned), total))
+        total = len(planned)
+
         tasks = []
-        for idx, video_file in enumerate(video_files, start=1):
-            output_file = build_output_path(video_file, source_dir, output_dir, output_ext)
+        for idx, (video_file, output_file) in enumerate(planned, start=1):
             output_file.parent.mkdir(parents=True, exist_ok=True)
             tasks.append((idx, total, video_file, output_file, preset, source_dir, output_dir))
 
