@@ -64,6 +64,7 @@ def user_print(msg):
 
 
 def get_input_path(prompt):
+    """返回 (source_dir, single_file)。single_file 为 None 表示扫描整个目录。"""
     while True:
         raw = input(prompt).strip().strip('"').strip("'").strip()
         if not raw:
@@ -74,12 +75,15 @@ def get_input_path(prompt):
                 user_print("路径不存在: {}".format(p))
                 continue
             if p.is_file():
-                user_print("提示：输入的是文件，已改用其所在文件夹作为源目录: {}".format(p.parent))
-                p = p.parent
+                if p.suffix.lower() not in VIDEO_EXTENSIONS:
+                    user_print("不是支持的视频文件: {}".format(p))
+                    continue
+                user_print("提示：检测到单个视频文件，将只转码该文件: {}".format(p.name))
+                return p.parent.resolve(), p.resolve()
             if not p.is_dir():
                 user_print("路径不是文件夹: {}".format(p))
                 continue
-            return p.resolve()
+            return p.resolve(), None
         except OSError as e:
             user_print("无法访问 {}: {}".format(p, e))
 
@@ -349,9 +353,11 @@ def main():
         workers = get_worker_count()
         log("并行数: {}".format(workers))
 
-        print("【第一步】原文件夹")
-        source_dir = get_input_path("  （可拖拽）: ")
+        print("【第一步】原文件夹（或单个视频文件）")
+        source_dir, single_file = get_input_path("  （可拖拽）: ")
         log("原文件夹: {}".format(source_dir))
+        if single_file is not None:
+            log("单文件模式: {}".format(single_file))
 
         print("【第二步】输出文件夹")
         output_dir = get_output_path("  （可拖拽）: ")
@@ -359,7 +365,10 @@ def main():
         log()
 
         user_print("扫描中……")
-        video_files, walk_errors = collect_video_files(source_dir)
+        if single_file is not None:
+            video_files, walk_errors = [single_file], []
+        else:
+            video_files, walk_errors = collect_video_files(source_dir)
         total = len(video_files)
         if total == 0:
             for e in walk_errors:
