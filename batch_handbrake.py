@@ -69,10 +69,19 @@ def get_input_path(prompt):
         if not raw:
             continue
         p = Path(raw)
-        if not p.exists():
-            user_print("路径不存在: {}".format(p))
-            continue
-        return p.resolve()
+        try:
+            if not p.exists():
+                user_print("路径不存在: {}".format(p))
+                continue
+            if p.is_file():
+                user_print("提示：输入的是文件，已改用其所在文件夹作为源目录: {}".format(p.parent))
+                p = p.parent
+            if not p.is_dir():
+                user_print("路径不是文件夹: {}".format(p))
+                continue
+            return p.resolve()
+        except OSError as e:
+            user_print("无法访问 {}: {}".format(p, e))
 
 
 def get_output_path(prompt):
@@ -123,12 +132,18 @@ def get_preset():
 
 def collect_video_files(source_dir):
     files = []
-    for root, dirs, filenames in os.walk(source_dir):
+    walk_errors = []
+
+    def onerror(err):
+        walk_errors.append(err)
+        log("扫描出错: {}".format(err), level="WARN")
+
+    for root, dirs, filenames in os.walk(source_dir, onerror=onerror):
         for fname in filenames:
             if Path(fname).suffix.lower() in VIDEO_EXTENSIONS:
                 files.append(Path(root) / fname)
     files.sort()
-    return files
+    return files, walk_errors
 
 
 def get_relative_path(file_path, source_dir):
@@ -344,9 +359,11 @@ def main():
         log()
 
         user_print("扫描中……")
-        video_files = collect_video_files(source_dir)
+        video_files, walk_errors = collect_video_files(source_dir)
         total = len(video_files)
         if total == 0:
+            for e in walk_errors:
+                user_print("无法访问: {}".format(e))
             user_print("未找到视频文件")
             input("按回车退出...")
             return
