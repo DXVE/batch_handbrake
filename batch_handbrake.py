@@ -66,6 +66,15 @@ def user_print(msg):
         print(msg, flush=True)
 
 
+def print_usage_tips():
+    """启动时提示 HandBrakeCLI 的放置方式与日志位置。"""
+    user_print("【使用提醒】")
+    user_print("  · 请将 HandBrakeCLI.exe 放在本脚本同目录下，未放置时会回退到系统安装路径。")
+    user_print("  · 当前使用: {}".format(HANDBRAKE_CLI))
+    user_print("  · 日志文件保存在同目录 log\\ 文件夹。")
+    user_print("")
+
+
 def get_input_path(prompt):
     """返回 (source_dir, single_file)。single_file 为 None 表示扫描整个目录。"""
     while True:
@@ -319,7 +328,7 @@ def list_preset_names(preset_file=None):
 
 
 def check_preset(preset, container):
-    """开工前校验预设，返回解析出的预设名；用户选择中止时返回 None。"""
+    """开始处理前校验预设，返回解析出的预设名；用户选择中止时返回 None。"""
     user_print("【预检】预设")
     preset_name = preset
     preset_json = None
@@ -532,6 +541,8 @@ def main():
         log("日志: {}".format(log_path))
         log("启动")
         log("HandBrakeCLI: {}".format(HANDBRAKE_CLI))
+
+        print_usage_tips()
 
         if not os.path.isfile(HANDBRAKE_CLI):
             user_print("找不到 HandBrakeCLI.exe: {}".format(HANDBRAKE_CLI))

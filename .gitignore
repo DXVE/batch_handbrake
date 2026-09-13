@@ -6,6 +6,8 @@ HandBrakeCLI.exe
 
 # 日志目录
 log/
+# screenshot
+screenshot/
 
 # Python 缓存
 __pycache__/

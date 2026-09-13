@@ -14,10 +14,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: 打包脚本
-        run: git archive --format=zip --output=${{ github.event.repository.name }}.zip HEAD
+      - name: 重命名脚本
+        id: pkg
+        run: |
+          name="batch_handbrake-${GITHUB_REF_NAME#v}.py"
+          cp batch_handbrake.py "$name"
+          echo "asset=$name" >> "$GITHUB_OUTPUT"
 
       - name: 创建 Release 并上传
         uses: softprops/action-gh-release@v3
         with:
-          files: ${{ github.event.repository.name }}.zip
+          files: ${{ steps.pkg.outputs.asset }}
