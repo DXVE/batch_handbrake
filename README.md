@@ -4,12 +4,12 @@
 
 <table align="center">
   <tr>
-    <td align="center" width="30%"><img src="/screenshot/1.png" alt="脚本运行" width="95%"></td>
-    <td align="center" width="30%"><img src="/screenshot/2.png" alt="目录结构" width="95%"></td>
+    <td align="center" width="30%"><img src="https://github.com/user-attachments/assets/5d279f9d-0e9a-4435-a765-f8cd1a3580d4" alt="脚本运行" width="95%"></td>
+    <td align="center" width="30%"><img src="https://github.com/user-attachments/assets/6ec5d1a3-94b9-4e64-9fdb-74fcb64abfce" alt="输出目录结构" width="95%"></td>
   </tr>
   <tr>
     <td align="center" width="30%"><sub style="color: #888;">脚本运行</sub></td>
-    <td align="center" width="30%"><sub style="color: #888;">目录结构</sub></td>
+    <td align="center" width="30%"><sub style="color: #888;">输出目录结构</sub></td>
   </tr>
 
 </table>
