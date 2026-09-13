@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HandBrake 批量转码脚本
+HandBrake 批量转码脚本 v1.1
 """
 
 import json
@@ -175,38 +175,52 @@ def _output_key(path):
     return str(path).casefold()
 
 
-def _unique_path(base, taken, avoid_disk):
+def _unique_path(base, taken, avoid_disk, avoid_inputs=frozenset()):
     candidate = base
     index = 1
-    while _output_key(candidate) in taken or (avoid_disk and candidate.exists()):
+    while (_output_key(candidate) in taken
+           or _output_key(candidate) in avoid_inputs
+           or (avoid_disk and candidate.exists())):
         candidate = base.with_name("{}_{}{}".format(base.stem, index, base.suffix))
         index += 1
     return candidate
 
 
-def plan_outputs(video_files, source_dir, output_dir, ext):
+def plan_outputs(video_files, source_dir, output_dir, ext, input_paths=frozenset()):
     """确定每个源文件的最终输出路径，处理批内重名与已存在的成品。
+
+    input_paths 为全部输入文件的规范化路径集合，任何输出都不会落在这些路径上，
+    因此原始素材永远不会被成品覆盖（原地转码时自动改名）。
 
     返回 [(video_file, output_file), ...]；已按用户选择跳过的不在其中。
     """
     assigned = []
     taken = set()
     renamed = []
+    protected = []
 
     for video_file in video_files:
         base = build_output_path(video_file, source_dir, output_dir, ext)
         final = base
-        if _output_key(base) in taken:
-            final = _unique_path(base, taken, avoid_disk=False)
+        if _output_key(base) in taken or _output_key(base) in input_paths:
+            final = _unique_path(base, taken, avoid_disk=False, avoid_inputs=input_paths)
         taken.add(_output_key(final))
         assigned.append([video_file, final])
         if final != base:
-            renamed.append((base, final))
+            if _output_key(base) in input_paths:
+                protected.append((base, final))
+            else:
+                renamed.append((base, final))
 
     if renamed:
         user_print("【预检】发现 {} 处输出重名，已自动改名以保留全部文件：".format(len(renamed)))
         for before, after in renamed:
-            user_print("  {}  ->  {}".format(before.name, after.name))
+            user_print("  {}  -> {}".format(before.name, after.name))
+
+    if protected:
+        user_print("【预检】发现 {} 处输出与源文件重名，已自动改名以避免覆盖原始素材：".format(len(protected)))
+        for before, after in protected:
+            user_print("  {}  -> {}".format(before.name, after.name))
 
     existing = [pair for pair in assigned if pair[1].exists()]
     if existing:
@@ -217,7 +231,7 @@ def plan_outputs(video_files, source_dir, output_dir, ext):
         choice = input("  选择 (回车=1): ").strip()
         if choice == "3":
             for pair in existing:
-                pair[1] = _unique_path(pair[1], taken, avoid_disk=True)
+                pair[1] = _unique_path(pair[1], taken, avoid_disk=True, avoid_inputs=input_paths)
                 taken.add(_output_key(pair[1]))
         elif choice == "2":
             pass
@@ -547,11 +561,30 @@ def main():
         log("输出文件夹: {}".format(output_dir))
         log()
 
+        source_resolved = source_dir.resolve()
+        output_resolved = output_dir.resolve()
+        output_inside_source = (source_resolved != output_resolved
+                                and source_resolved in output_resolved.parents)
+        if single_file is None and output_inside_source:
+            user_print("提示：输出目录位于源目录内，将自动排除输出目录下的文件，避免重复转码")
+        elif single_file is None and source_resolved == output_resolved:
+            user_print("警告：输出目录与源目录相同，将对源目录内的文件原地转码；")
+            user_print("      脚本不会覆盖任何原始素材，输出与源文件重名时会自动改名。")
+
         user_print("扫描中……")
         if single_file is not None:
             video_files, walk_errors = [single_file], []
         else:
             video_files, walk_errors = collect_video_files(source_dir)
+            if output_inside_source:
+                before = len(video_files)
+                video_files = [f for f in video_files
+                               if output_resolved not in f.resolve().parents]
+                excluded = before - len(video_files)
+                if excluded:
+                    user_print("已排除输出目录内的 {} 个文件，避免重复转码".format(excluded))
+                    log("排除输出目录内的文件: {} 个".format(excluded))
+        input_paths = frozenset(_output_key(f) for f in video_files)
         total = len(video_files)
         if total == 0:
             for e in walk_errors:
@@ -577,7 +610,7 @@ def main():
             input("按回车退出...")
             return
 
-        planned = plan_outputs(video_files, source_dir, output_dir, output_ext)
+        planned = plan_outputs(video_files, source_dir, output_dir, output_ext, input_paths)
         if not planned:
             user_print("所有输出都已存在，无需转码")
             input("按回车退出...")
